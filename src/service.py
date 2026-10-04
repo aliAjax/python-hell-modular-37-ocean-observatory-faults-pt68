@@ -1,8 +1,7 @@
-import hashlib
 from uuid import uuid4
 
 from .audit import AuditTrail
-from .domain import ConflictError, NotFoundError, PermissionDenied, ValidationError
+from .domain import ConflictError, NotFoundError
 from .rules import RuleEngine
 
 
@@ -31,6 +30,15 @@ class DomainService:
         entity_id = str(payload.pop("id", "") or uuid4())
         if self.repository.get_entity(entity_id):
             raise ConflictError("entity already exists: " + entity_id)
+        # 同一事件同一处置的并发提交：先入库的一方生效
+        if kind == "recovery_action":
+            disposition_key = payload.get("disposition_key") or payload.get("action_type")
+            payload["disposition_key"] = disposition_key
+            if not self.repository.claim_disposition(
+                    payload["incident_id"], disposition_key, entity_id, actor.user_id):
+                raise ConflictError(
+                    "disposition %s for incident %s was already submitted first"
+                    % (disposition_key, payload["incident_id"]))
         status = self.rules.initial_status(kind, payload)
         entity = self.repository.create_entity(entity_id, kind, status, payload, actor.user_id)
         self.audit.record(entity_id, actor, "create", None, status, {"kind": kind})
@@ -58,37 +66,6 @@ class DomainService:
             {"patch": patch},
         )
         return updated
-
-    def merge_offline(self, actor, records):
-        """Merge field records by a stable (source_id, record_id) identity."""
-        if not isinstance(records, list):
-            raise ValidationError("records must be a list")
-        created = []
-        for raw in records:
-            if not isinstance(raw, dict):
-                raise ValidationError("each offline record must be an object")
-            source_id = str(raw.get("source_id", "")).strip()
-            record_id = str(raw.get("record_id", "")).strip()
-            if not source_id or not record_id:
-                raise ValidationError("source_id and record_id are required")
-            digest = hashlib.sha256((source_id + "\0" + record_id).encode("utf-8")).hexdigest()[:32]
-            entity_id = "offline-" + digest
-            existing = self.repository.get_entity(entity_id)
-            if existing:
-                created.append(existing)
-                continue
-            payload = dict(raw)
-            self.rules.validate_create(actor, "offline_record", payload, self._lookup)
-            entity = self.repository.create_entity(
-                entity_id,
-                "offline_record",
-                self.rules.initial_status("offline_record", payload),
-                payload,
-                actor.user_id,
-            )
-            self.audit.record(entity_id, actor, "merge_offline", None, entity["status"], {"source_id": source_id, "record_id": record_id})
-            created.append(entity)
-        return created
 
     def get(self, entity_id):
         entity = self.repository.get_entity(entity_id)

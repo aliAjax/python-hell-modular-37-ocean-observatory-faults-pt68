@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.domain import Actor, ConflictError, InvalidTransition, PermissionDenied
+from src.domain import Actor, ConflictError, PermissionDenied
 from src.repository import SQLiteRepository
 from src.rules import RuleEngine
 from src.service import DomainService

@@ -18,7 +18,7 @@ def _json_bytes(payload):
     return json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
-def create_handler(service, rules, static_dir):
+def create_handler(service, rules, static_dir, sync_service=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ModularPython/1.0"
 
@@ -84,9 +84,29 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if len(parts) == 5 and parts[:3] == ["api", "sync", "stations"] \
+                        and parts[4] == "outbox":
+                    query = parse_qs(parsed.query)
+                    status = query.get("status", [None])[0]
+                    return self._send(
+                        200,
+                        {"items": sync_service.list_outbox(self._actor(), parts[3], status)},
+                    )
+                if len(parts) == 5 and parts[:3] == ["api", "sync", "stations"] \
+                        and parts[4] == "reconciliations":
+                    return self._send(
+                        200,
+                        {"items": sync_service.list_reconciliations(self._actor(), parts[3])},
+                    )
+                if len(parts) == 3 and parts[:2] == ["api", "sync"] and parts[2] == "pending":
+                    query = parse_qs(parsed.query)
+                    status = query.get("status", ["pending"])[0]
+                    return self._send(200, {"items": sync_service.list_pending(status)})
+                if len(parts) == 4 and parts[:2] == ["api", "sync"] and parts[2] == "versions":
+                    return self._send(200, {"items": sync_service.list_versions(parts[3])})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
-                if len(parts) >= 2 and parts[0] == "api" and parts[1] != "entities":
+                if len(parts) >= 2 and parts[0] == "api" and parts[1] not in ("entities", "sync"):
                     if len(parts) == 3:
                         return self._send(200, service.get(parts[2]))
                     query = parse_qs(parsed.query)
@@ -101,9 +121,47 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                # 断网登记：回网前只入持久队列
+                if len(parts) == 5 and parts[:3] == ["api", "sync", "stations"] \
+                        and parts[4] == "queue":
+                    body = self._body()
+                    return self._send(
+                        202,
+                        sync_service.enqueue_records(actor, parts[3], body.get("records", [])),
+                    )
+                # 回网：先排空队列合并事件/遥测/恢复动作，再与中心对账
+                if len(parts) == 5 and parts[:3] == ["api", "sync", "stations"] \
+                        and parts[4] == "reconnect":
+                    return self._send(200, sync_service.reconnect(actor, parts[3]))
+                # 直接提交一个回传批次：只合并不对账
+                if parts == ["api", "sync", "batches"]:
+                    body = self._body()
+                    return self._send(
+                        200,
+                        sync_service.apply_records(
+                            actor, body.get("station_id"), body.get("records", [])),
+                    )
+                # 触发对账（合并已排空时单独调用）
+                if len(parts) == 5 and parts[:3] == ["api", "sync", "stations"] \
+                        and parts[4] == "reconcile":
+                    return self._send(200, sync_service.reconcile(actor, parts[3], save=True))
+                # 待处理副本：apply / reject
+                if len(parts) == 4 and parts[:2] == ["api", "sync"] and parts[2] == "pending":
+                    body = self._body()
+                    decision = body.get("decision")
+                    return self._send(
+                        200, sync_service.resolve_pending(actor, parts[3], decision))
+                # 两版测量/处置择一
+                if len(parts) == 5 and parts[:2] == ["api", "sync"] and parts[2] == "versions":
+                    return self._send(
+                        200, sync_service.select_version(actor, parts[3], parts[4]))
                 if parts == ["api", "offline-records"]:
                     body = self._body()
-                    return self._send(200, {"items": service.merge_offline(actor, body.get("records", []))})
+                    return self._send(
+                        200,
+                        sync_service.apply_records(actor, body.get("station_id"),
+                                                   body.get("records", [])),
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)
@@ -140,6 +198,6 @@ def create_handler(service, rules, static_dir):
     return Handler
 
 
-def create_server(host, port, service, rules, static_dir):
-    handler = create_handler(service, rules, static_dir)
+def create_server(host, port, service, rules, static_dir, sync_service=None):
+    handler = create_handler(service, rules, static_dir, sync_service)
     return ThreadingHTTPServer((host, int(port)), handler)

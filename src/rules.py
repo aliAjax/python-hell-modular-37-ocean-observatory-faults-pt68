@@ -1,5 +1,3 @@
-from datetime import datetime, timedelta
-
 from .domain import ConflictError, InvalidTransition, PermissionDenied, ValidationError
 
 
@@ -122,6 +120,24 @@ def _resolve_incident(actor, entity, data, lookup):
     assets = [a for a in _all(lookup, "asset") if a["status"] in ("faulty", "offline", "rebooting")]
     if entity["data"].get("asset_id") and any(a["id"] == entity["data"].get("asset_id") for a in assets):
         raise ConflictError("affected asset is still unavailable")
+    # 测量和处置各留两版时，必须先选定一版才能关闭事件
+    asset_id = entity["data"].get("asset_id")
+    pending_measurements = [
+        t for t in _all(lookup, "telemetry")
+        if t["data"].get("divergent") and (not asset_id or t["data"].get("asset_id") == asset_id)
+    ]
+    if pending_measurements:
+        raise ConflictError("telemetry has two unselected measurement versions")
+    pending_dispositions = [
+        a for a in _all(lookup, "recovery_action")
+        if a["data"].get("divergent") and a["data"].get("incident_id") == entity["id"]
+    ]
+    if pending_dispositions:
+        raise ConflictError("recovery disposition has two unselected action versions")
+    # 事件自身字段存在两版且未择一，同样不能关闭
+    if entity["data"].get("divergent"):
+        raise ConflictError("incident has unselected field versions: %s"
+                            % ",".join(entity["data"].get("divergent_fields", [])))
     return {"resolved_by": actor.user_id}
 
 
@@ -274,6 +290,16 @@ class RuleEngine:
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
+
+    def can_reach(self, kind, current_status, target_status):
+        """状态机可达性：目标即当前状态，或可经任意动作一步到达。"""
+        kind = self.normalize_kind(kind)
+        if current_status == target_status:
+            return True
+        for action, (allowed_statuses, next_status) in self.TRANSITIONS.get(kind, {}).items():
+            if current_status in allowed_statuses and next_status == target_status:
+                return True
+        return False
 
     def initial_status(self, kind, data=None):
         kind = self.normalize_kind(kind)
