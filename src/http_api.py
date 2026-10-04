@@ -84,6 +84,12 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "pending-copies"]:
+                    return self._send(200, {"items": service.repository.list_pending_copies()})
+                if parts == ["api", "queue"]:
+                    return self._send(200, {"items": service.repository.list_queue()})
+                if parts == ["api", "reconcile"]:
+                    return self._send(200, service.reconcile())
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api" and parts[1] != "entities":
@@ -104,6 +110,10 @@ def create_handler(service, rules, static_dir):
                 if parts == ["api", "offline-records"]:
                     body = self._body()
                     return self._send(200, {"items": service.merge_offline(actor, body.get("records", []))})
+                if len(parts) == 4 and parts[:2] == ["api", "pending-copies"] and parts[3] == "apply":
+                    return self._send(200, service.apply_pending_copy(actor, parts[2]))
+                if len(parts) == 4 and parts[:2] == ["api", "pending-copies"] and parts[3] == "discard":
+                    return self._send(200, service.discard_pending_copy(actor, parts[2]))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)

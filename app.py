@@ -18,6 +18,8 @@ def main(argv=None):
     repository = SQLiteRepository(args.db)
     rules = RuleEngine()
     service = DomainService(repository, rules)
+    # Restart continues any steps left in the retry queue.
+    service.recover_pending()
     static_dir = Path(__file__).resolve().parent / "static"
     server = create_server(args.host, args.port, service, rules, str(static_dir))
 

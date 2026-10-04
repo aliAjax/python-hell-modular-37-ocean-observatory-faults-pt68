@@ -112,6 +112,35 @@ def _revise_telemetry(actor, entity, data, lookup):
     return {"late_revision": True, "revised_by": actor.user_id}
 
 
+def _pending_versions(lookup, entity):
+    """Pending two-version copies that block closing an incident."""
+    copies = _all(lookup, "pending_copy")
+    asset_id = entity["data"].get("asset_id")
+    out = []
+    for copy in copies:
+        if copy["status"] != "pending":
+            continue
+        if copy["data"].get("reason") != "two_version":
+            continue
+        if copy["data"].get("incident_id") == entity["id"]:
+            out.append(copy)
+        elif asset_id and copy["data"].get("asset_id") == asset_id:
+            out.append(copy)
+    return out
+
+
+def _closing_basis(lookup, entity):
+    basis = {"telemetry": {}, "stale": False}
+    asset_id = entity["data"].get("asset_id")
+    for item in _all(lookup, "telemetry"):
+        if item["data"].get("asset_id") != asset_id:
+            continue
+        metric = item["data"].get("metric")
+        revision = int(item["data"].get("revision", 0))
+        basis["telemetry"][metric] = max(basis["telemetry"].get(metric, 0), revision)
+    return basis
+
+
 def _resolve_incident(actor, entity, data, lookup):
     actions = [a for a in _all(lookup, "recovery_action") if a["data"].get("incident_id") == entity["id"] and a["status"] not in ("succeeded", "failed", "cancelled")]
     if actions:
@@ -122,7 +151,19 @@ def _resolve_incident(actor, entity, data, lookup):
     assets = [a for a in _all(lookup, "asset") if a["status"] in ("faulty", "offline", "rebooting")]
     if entity["data"].get("asset_id") and any(a["id"] == entity["data"].get("asset_id") for a in assets):
         raise ConflictError("affected asset is still unavailable")
-    return {"resolved_by": actor.user_id}
+    if _pending_versions(lookup, entity):
+        raise ConflictError("incident cannot resolve while measurement or handling versions are pending selection")
+    return {
+        "resolved_by": actor.user_id,
+        "closing_basis": _closing_basis(lookup, entity),
+        "closing_basis_stale": False,
+    }
+
+
+def _close_incident(actor, entity, data, lookup):
+    if _pending_versions(lookup, entity):
+        raise ConflictError("incident cannot close while measurement or handling versions are pending selection")
+    return {"closed_by": actor.user_id}
 
 
 def _complete_action(actor, entity, data, lookup):
@@ -268,6 +309,7 @@ class RuleEngine:
     CUSTOM_TRANSITIONS = {
         ("telemetry", "revise"): _revise_telemetry,
         ("incident", "resolve"): _resolve_incident,
+        ("incident", "close"): _close_incident,
         ("recovery_action", "succeed"): _complete_action,
         ("mission", "complete"): _complete_mission,
     }
